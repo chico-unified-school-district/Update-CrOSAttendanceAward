@@ -235,7 +235,8 @@ function Update-CrosOU {
  begin {
   Write-Host ('{0},Removing old log files...' -f $MyInvocation.MyCommand.Name) -F Cyan
   $deleteOlderThanDate = (Get-Date).AddDays(-1)
-  $oldLogs = Get-ChildItem -Path .\log\* | Where-Object { ($_.LastWriteTime -le $deleteOlderThanDate) }
+  if (!(Test-Path -Path .\log)) { New-Item -Path .\log -ItemType Directory | Out-Null }
+  $oldLogs = Get-ChildItem -Path .\log\*.log | Where-Object { ($_.LastWriteTime -le $deleteOlderThanDate) }
   $oldLogs | Remove-Item -Force -Confirm:$false
 
   $awardLog = ".\log\award-log-$(Get-Date -f yyyy-MM-dd).csv"
