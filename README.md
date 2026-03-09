@@ -27,14 +27,14 @@ The script:
 
 ## Prerequisites
 
-## 1) PowerShell + Modules
+### 1) PowerShell + Modules
 
 Required modules:
 
 - `dbatools` (uses `Invoke-DbaQuery`, `Connect-DbaInstance`, etc.)
 - `CommonScriptFunctions` (environment-specific shared functions used by this script)
 
-## 2) GAM7
+### 2) GAM7
 
 This script expects GAM at:
 
@@ -42,7 +42,7 @@ This script expects GAM at:
 
 It uses GAM to read/update ChromeOS device org units.
 
-## 3) SQL Access
+### 3) SQL Access
 
 You need:
 
@@ -50,7 +50,7 @@ You need:
 - Database name
 - credential with permission to run the queries in `sql/`
 
-## 4) Google Admin Permissions
+### 4) Google Admin Permissions
 
 The GAM account must be able to:
 
@@ -144,7 +144,9 @@ From repo root:
    - SIS Chromebook assignments
    - Google ChromeOS device export (cached daily in `data/`)
 5. For each student/device:
+   - select tardy lookup SQL by site code (`SC`)
    - find latest tardy date
+   - set default OU by site code (`SC`) with fallback to `-DefaultCrosOrgUnit`
    - choose highest eligible award OU, else default OU
 6. Update ChromeOS OU when current OU differs from target OU
 7. Write change log to `log/award-log-yyyy-MM-dd.csv`
@@ -157,12 +159,14 @@ From repo root:
 
 - `data/GSuite-Export-yyyy-MM-dd.csv`
   - reused if it already exists for the day
+   - old files older than 1 day are removed at runtime
 
 ## Update Log
 
 - `log/award-log-yyyy-MM-dd.csv`
   - columns: `id,sn,ou`
   - only created when at least one OU change is detected
+   - old log files older than 1 day are removed at runtime
 
 ---
 
@@ -174,9 +178,13 @@ Current main script references:
 - `sql/sis-get-cros.sql`
 - `sql/sis-active-students.sql`
 - `sql/sis-select-no-student-days.sql`
-- `sql/tardy-test.sql`
+- `sql/sis-tardy-lookup-middle-school.sql`
 
-If needed, swap `tardy-test.sql` to another tardy query file in `sql/` for production behavior.
+The tardy lookup SQL is selected in-script per student site code (`SC`) via `Set-LatestTardyLookupSql`.
+Current mapping in script:
+
+- `SC = 5` -> `sql/sis-tardy-lookup-middle-school.sql`
+- other `SC` values currently throw an error until mapped
 
 ---
 
@@ -200,6 +208,7 @@ Then remove `-wi` once validated.
 - **GAM errors**: confirm `C:\GAM7\gam.exe` exists and auth is valid.
 - **SQL errors**: verify server/database/credential and query permissions.
 - **Unexpected tiering**: verify `awardTable.csv` values and OU paths.
+- **Unknown site code error**: add a mapping in `Set-LatestTardyLookupSql` and `Set-DefaultOU` for that `SC`.
 
 ---
 
