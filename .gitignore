@@ -1,0 +1,5 @@
+/params.ps1
+/jenkins.ps1
+/data/*.csv
+/notes.txt
+/log

@@ -1,0 +1,7 @@
+-- DECLARE @days INT = -80; -- for testing
+DECLARE @TodayStart DATETIME = CAST(GETDATE() AS DATE); --Today at 12:00am
+SELECT DISTINCT DT from DAY
+WHERE
+HO IS NOT NULL AND HO <> ''
+AND DT < @TodayStart AND DT > DATEADD(DAY,CAST(@days AS INT),GETDATE())
+ORDER BY DT DESC

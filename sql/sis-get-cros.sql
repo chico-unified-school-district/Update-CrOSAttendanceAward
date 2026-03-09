@@ -1,0 +1,16 @@
+SELECT
+ [STU].[ID],
+ [DRI].[SR] AS [SerialNumber],
+ DRI.BC AS BarCode
+FROM (
+ SELECT [DRI].* FROM [DRI] WHERE DEL = 0) [DRI]
+RIGHT JOIN ((SELECT [STU].* FROM STU WHERE DEL = 0) [STU]
+LEFT JOIN (SELECT [DRA].*
+FROM [DRA] WHERE DEL = 0) [DRA]
+ON [STU].[ID] = [DRA].[ID])
+ON [DRI].[RID] = [DRA].[RID]
+AND [DRI].[RIN] = [DRA].[RIN]
+WHERE NOT STU.TG > ' '
+and DRI.RID= 1
+and ( DRA.CD ='' or DRA.CD='V')
+and DRA.RD is NULL
