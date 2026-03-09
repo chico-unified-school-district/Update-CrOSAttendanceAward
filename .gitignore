@@ -2,4 +2,4 @@
 /jenkins.ps1
 /data/*.csv
 /notes.txt
-/log
+/log/*

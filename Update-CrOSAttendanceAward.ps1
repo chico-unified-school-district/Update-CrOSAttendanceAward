@@ -13,6 +13,7 @@ function Format-StudentObject {
  process {
   [PSCustomObject]@{
    cros            = $null
+   defaultOU       = $null
    latestTardyDate = $null
    sis             = $_
    tardyLookupSql  = $null
@@ -35,6 +36,11 @@ function Format-TierObject {
 }
 
 function Get-GSuiteCrosDevices {
+ Write-Host ('{0},Removing old .csv (gSuite data) files...' -f $MyInvocation.MyCommand.Name) -F Cyan
+ $deleteOlderThanDate = (Get-Date).AddDays(-1)
+ $oldCSVs = Get-ChildItem -Path .\data\*.csv | Where-Object { ($_.LastWriteTime -le $deleteOlderThanDate) }
+ $oldCSVs | Remove-Item -Force -Confirm:$false
+
  $exportPath = ".\data\GSuite-Export-$(Get-Date -f yyyy-MM-dd).csv"
  if (Test-Path -Path $exportPath) {
   $results = Import-Csv -Path $exportPath
@@ -78,7 +84,7 @@ function Get-SiSStudents ($instance, $siteCodes) {
  $sisStudentData | ConvertTo-Csv | ConvertFrom-Csv
 }
 
-function Set-AwardZone ($tierArray, $startDate, $defaultOU) {
+function Set-AwardZone ($tierArray, $startDate) {
  begin {
   $firstDaySchoolDate = Get-Date $startDate
  }
@@ -92,7 +98,7 @@ function Set-AwardZone ($tierArray, $startDate, $defaultOU) {
      $_.targetOU = $tier.awardData.ou
      return $_
     }
-    else { $defaultOU }
+    else { $_.defaultOU }
    }
   }
   # tiers need to be by sorted from most to least number of days for proper function.
@@ -103,7 +109,7 @@ function Set-AwardZone ($tierArray, $startDate, $defaultOU) {
     return $_
    }
   }
-  $_.targetOU = $defaultOU # Catch-all
+  $_.targetOU = $_.defaultOU # Catch-all
   $_
  }
 }
@@ -137,9 +143,20 @@ function Set-DaysBack {
  }
 }
 
+function Set-DefaultOU ($defaultOU) {
+ process {
+  $_.defaultOU = switch ($_.sis.SC) {
+   { $_ -in 5 } { '/Chromebooks/1:1' }
+   default { $defaultOU }
+  }
+  Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.defaultOU)
+  $_
+ }
+}
+
 function Set-LatestTardyDate($instance) {
  process {
-  $sql = Get-Content -Path $sqlPath -Raw
+  $sql = Get-Content -Path $_.tardyLookupSql -Raw
   $data = New-SqlOperation -Server $instance -Query $sql -Parameters "permId=$($_.sis.ID)"
   $_.latestTardyDate = if ($data.DT -match '\d{4}') { Get-Date $data.DT } else { $null }
   Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.latestTardyDate)
@@ -150,14 +167,10 @@ function Set-LatestTardyDate($instance) {
 function Set-LatestTardyLookupSql {
  process {
   $_.tardyLookupSql = switch ($_.sis.SC) {
-   5 { '.\sql\tardy-sc1.sql' }
-   default { throw ('{0},{1},Unknown SC: {2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.sis.SC) }
+   { $_ -in 5 } { '.\sql\sis-tardy-lookup-middle-school.sql' }
+   default { throw ('{0},{1},Unknown SC: [{2}]' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.sis.SC) }
   }
-  # Write-Host ('{0}' -f $MyInvocation.MyCommand.Name)
-  if (!$_.tardyLookupSql) {
-   Write-Host ('{0},{1},No tardy lookup SQL assigned. Cannot determine tardy sql lookup file. Skipping...' -f $MyInvocation.MyCommand.Name, $_.sis.ID)
-   return
-  }
+  if (!$_.tardyLookupSql) { return }
   $_
  }
 }
@@ -213,6 +226,11 @@ function Show-Object {
 
 function Update-CrosOU {
  begin {
+  Write-Host ('{0},Removing old log files...' -f $MyInvocation.MyCommand.Name) -F Cyan
+  $deleteOlderThanDate = (Get-Date).AddDays(-1)
+  $oldLogs = Get-ChildItem -Path .\log\* | Where-Object { ($_.LastWriteTime -le $deleteOlderThanDate) }
+  $oldLogs | Remove-Item -Force -Confirm:$false
+
   $awardLog = ".\log\award-log-$(Get-Date -f yyyy-MM-dd).csv"
   $list = New-Object System.Collections.Generic.List[string]
   $list.Add('id,sn,ou')
@@ -258,17 +276,16 @@ $tierData = $awardTable | Sort-Object -Property days -Descending | Format-TierOb
 $schoolStartDate = Get-SchoolStartDate -instance $sisInstance
 
 $siSCrosDevices = Get-SiSCrosDevices -instance $sisInstance
-# TODO Export for faster test runs. Consider adding WhatIf Logic
 $gSuiteCrosDevices = Get-GSuiteCrosDevices
 
 Get-SiSStudents -instance $sisInstance -siteCodes $ValidSiteCodes | Format-StudentObject |
  Set-CrosDevice -gSuiteData $gSuiteCrosDevices -sisData $siSCrosDevices |
-  # Set-LatestTardyLookupSql |
-  Set-LatestTardyDate -instance $sisInstance -sqlPath '.\sql\tardy-test.sql' |
-   # Set-DefaultOU |
-   Set-AwardZone -tierArray $tierData -startDate $schoolStartDate -defaultOU $DefaultCrosOrgUnit |
-    Set-CrosDevice -sisData $siSCrosDevices -gSuiteData $gSuiteCrosDevices |
-     Update-CrosOU |
-      Show-Object
+  Set-LatestTardyLookupSql |
+   Set-LatestTardyDate -instance $sisInstance |
+    Set-DefaultOU $DefaultCrosOrgUnit |
+     Set-AwardZone -tierArray $tierData -startDate $schoolStartDate -defaultOU |
+      Set-CrosDevice -sisData $siSCrosDevices -gSuiteData $gSuiteCrosDevices |
+       Update-CrosOU |
+        Show-Object
 
 if ($WhatIf) { Show-TestRun }
