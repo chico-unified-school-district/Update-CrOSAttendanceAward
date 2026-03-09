@@ -36,6 +36,7 @@ function Format-TierObject {
 }
 
 function Get-GSuiteCrosDevices {
+
  Write-Host ('{0},Removing old .csv (gSuite data) files...' -f $MyInvocation.MyCommand.Name) -F Cyan
  $deleteOlderThanDate = (Get-Date).AddDays(-1)
  $oldCSVs = Get-ChildItem -Path .\data\*.csv | Where-Object { ($_.LastWriteTime -le $deleteOlderThanDate) }
@@ -50,7 +51,9 @@ function Get-GSuiteCrosDevices {
   $fields = 'deviceId,serialNumber,orgUnitPath'
   $backDate = Get-Date (Get-Date 12:00AM).AddMonths(-6) -f yyyy-MM-dd
   Write-Host ('{0}' -f $MyInvocation.MyCommand.Name) -F Green
+  $ErrorActionPreference = 'Continue'
   ($results = & $gam print cros fields $fields query "sync:$backDate.." | ConvertFrom-Csv )*>$null
+  $ErrorActionPreference = 'Stop'
   $results | Export-Csv -Path $exportPath -NoTypeInformation
  }
  Write-Host ('{0},Count: {1}' -f $MyInvocation.MyCommand.Name, @($results).Count) -F Green
