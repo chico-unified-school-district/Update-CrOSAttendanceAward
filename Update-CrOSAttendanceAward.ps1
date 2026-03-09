@@ -60,6 +60,10 @@ function Get-GSuiteCrosDevices {
 function Get-SchoolStartDate ($instance) {
  $sql = Get-Content -Path .\sql\sis-select-first-day-of-school.sql -Raw
  $result = New-SqlOperation -Server $instance -Query $sql
+ if ($result.date -notmatch '\d{4}') {
+  Write-Error ('{0},School start date lookup error. Exiting.' -f $MyInvocation.MyCommand.Name)
+  exit
+ }
  $startDate = Get-Date $result.date
  if ($startDate -isnot [datetime]) {
   Write-Error ('{0}' -f $MyInvocation.MyCommand.Name)
