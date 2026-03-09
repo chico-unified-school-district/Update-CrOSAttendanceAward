@@ -245,11 +245,13 @@ function Update-CrosOU {
  }
  process {
   $msg = $MyInvocation.MyCommand.Name, $_.sis.ID, $_.cros.serialNumber, $_.cros.orgUnitPath, $_.targetOU
-  Write-Verbose ('{0},PermId: [{1}],SN: [{2}],Current OU:[{3}],New OU: [{4}]' -f $msg)
   if ($_.cros.orgUnitPath.Trim() -eq $_.targetOU) { return }
   Write-Host ('{0},PermId: [{1}],SN: [{2}],Current OU:[{3}],New OU: [{4}]' -f $msg) -F Magenta
   $list.Add("$($_.sis.ID),$($_.cros.serialNumber),$($_.targetOU)")
-  if (!$WhatIf) { & $gam update cros $_.cros.deviceId ou $_.targetOU *>$null }
+  if (!$WhatIf) {
+   & $gam update cros $_.cros.deviceId ou $_.targetOU *>$null
+   Write-Host ('{0},{1},{2},CrOS OU Updated {3}>' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU, ('=' * 20)) -F Green
+  }
   $_
  }
  end {
