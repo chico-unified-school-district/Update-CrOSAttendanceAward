@@ -5,6 +5,7 @@ param (
  [Parameter(Mandatory = $True)][System.Management.Automation.PSCredential]$Credential,
  [int[]]$ValidSiteCodes,
  [string]$DefaultCrosOrgUnit,
+ [switch]$CheckEachLoop,
  [Alias('wi')]
  [switch]$WhatIf
 )
@@ -12,12 +13,12 @@ param (
 function Format-StudentObject {
  process {
   [PSCustomObject]@{
-   cros            = $null
-   defaultOU       = $null
-   latestTardyDate = $null
-   sis             = $_
-   tardyLookupSql  = $null
-   targetOU        = $null
+   cros                = $null
+   daysSinceEnrollment = $null
+   latestTardyDate     = $null
+   sis                 = $_
+   tardyLookupSql      = $null
+   targetOU            = $null
   }
  }
 }
@@ -83,7 +84,7 @@ function Get-SiSCrosDevices ($instance) {
 
 function Get-SiSStudents ($instance, $siteCodes) {
  $siteCodeList = $siteCodes -join ','
- $studentQuery = (Get-Content -Path .\sql\sis-active-students2.sql -Raw) -replace 'VALID_SITE_CODES', $siteCodeList
+ $studentQuery = (Get-Content -Path .\sql\sis-active-students.sql -Raw) -replace 'VALID_SITE_CODES', $siteCodeList
  $sisStudentData = Invoke-DbaQuery -SqlInstance $instance -Query $studentQuery
  Write-Host ('{0},Count: {1}' -f $MyInvocation.MyCommand.Name, $sisStudentData.Count) -F Green
  $sisStudentData | ConvertTo-Csv | ConvertFrom-Csv
@@ -94,27 +95,23 @@ function Set-AwardZone ($tierArray, $startDate) {
   $firstDaySchoolDate = Get-Date $startDate
  }
  process {
-  <# Start of school year - No tardies gets the highest award for which they might be eligible.
-  Evaluated based the on the first day of school. Tiers being ordered highest to lowest makes this work.#>
-  if ($_.latestTardyDate -isnot [datetime]) {
-   foreach ($tier in $tierArray) {
-    if ($tier.cutOffDate -gt $firstDaySchoolDate) {
-     Write-Host ('{0},{1},{2},No Tardy Date Detected' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $tier.awardData.ou) -F Blue
-     $_.targetOU = $tier.awardData.ou
-     return $_
-    }
-    else { $_.defaultOU }
-   }
-  }
-  # tiers need to be by sorted from most to least number of days for proper function.
+  $dateSinceEnr = (Get-Date 5:00PM).AddDays($_.daysSinceEnrollment * -1)
+  # Tiers being ordered highest to lowest required.
   foreach ($tier in $tierArray) {
-   if ($_.latestTardyDate -lt $tier.cutOffDate) {
-    $_.targetOU = $tier.AwardData.ou
-    Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $tier.awardData.ou)
-    return $_
+   if ($tier.cutOffDate -lt $firstDaySchoolDate) {
+    Write-Verbose ( '{0},{1} > {2}, Too early in the school year.=============>' -f $MyInvocation.MyCommand.Name, $tier.cutOffDate, $firstDaySchoolDate, $tier.awardData.ou )
+    continue
+   }
+   if ($dateSinceEnr -gt $tier.cutOffDate) {
+    Write-Verbose ( '{0},{1},{2} > {3}, Enrollment too fresh for tier {4} ||||||||||' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $dateSinceEnr, $tier.cutOffDate, $tier.awardData.ou )
+    continue
+   }
+   if (($_.latestTardyDate -le $tier.cutOffDate) -or ($_.latestTardyDate -isnot [datetime])) {
+    Write-Host ('{0},{1},{2},{3}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.latestTardyDate, $tier.awardData.ou) -F Green
+    $_.targetOU = $tier.AwardData.ou # Update from default OU to award OU
+    return $_ # If we get a match, we can exit the loop and function early since tiers are ordered highest to lowest.
    }
   }
-  $_.targetOU = $_.defaultOU # Catch-all
   $_
  }
 }
@@ -141,13 +138,21 @@ function Set-CrosDevice ($sisData, $gSuiteData) {
  }
 }
 
-function Set-DefaultOU ($defaultOU) {
+function Set-DaysSinceEnrollment {
  process {
-  $_.defaultOU = switch ($_.sis.SC) {
+  $_.daysSinceEnrollment = New-TimeSpan -Start (Get-Date $_.sis.ED) -End (Get-Date) | Select-Object -ExpandProperty Days
+  # Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.daysSinceEnrollment)
+  $_
+ }
+}
+
+function Set-DefaultOU ($ou) {
+ process {
+  $_.targetOU = switch ($_.sis.SC) {
    { $_ -in 5 } { '/Chromebooks/1:1' }
-   default { $defaultOU }
+   default { $ou }
   }
-  Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.defaultOU)
+  Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU)
   $_
  }
 }
@@ -175,12 +180,11 @@ function Set-LatestTardyLookupSql {
 
 function Set-TierCutOffDate {
  process {
-  $_.cutOffDate = (Get-Date).AddDays($_.lookBackDayCount * -1)
-  Write-Host ('{0},{1},{2:yyyy-MM-dd}' -f $MyInvocation.MyCommand.Name, $_.awardData.ou, $_.cutOffDate) -F Green
+  $_.cutOffDate = (Get-Date 5:00PM).AddDays($_.lookBackDayCount * -1)
+  Write-Host ('{0},{1},{2},{3:yyyy-MM-dd}' -f $MyInvocation.MyCommand.Name, $_.awardData.ou, $_.lookBackDayCount, $_.cutOffDate) -F Green
   $_
  }
 }
-
 
 function Set-LookBackDayCount ($instance) {
  begin {
@@ -216,7 +220,7 @@ function Set-LookBackDayCount ($instance) {
 function Show-Object {
  process {
   Write-Verbose ($MyInvocation.MyCommand.Name, $_ | Out-String)
-  # Read-Host 'eh!'
+  if ($CheckEachLoop) { Read-Host 'eh?' }
  }
 }
 
@@ -225,7 +229,7 @@ function Update-CrosOU {
   Write-Host ('{0},Removing old log files...' -f $MyInvocation.MyCommand.Name) -F Cyan
   $deleteOlderThanDate = (Get-Date).AddDays(-1)
   if (!(Test-Path -Path .\log)) { New-Item -Path .\log -ItemType Directory | Out-Null }
-  $oldLogs = Get-ChildItem -Path .\log\*.log | Where-Object { ($_.LastWriteTime -le $deleteOlderThanDate) }
+  $oldLogs = Get-ChildItem -Path .\log\*.csv | Where-Object { ($_.LastWriteTime -le $deleteOlderThanDate) }
   $oldLogs | Remove-Item -Force -Confirm:$false
 
   $awardLog = ".\log\award-log-$(Get-Date -f yyyy-MM-dd).csv"
@@ -239,14 +243,14 @@ function Update-CrosOU {
   $list.Add("(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'),$($_.sis.ID),$($_.cros.serialNumber),$($_.targetOU)")
   if (!$WhatIf) {
    & $gam update cros $_.cros.deviceId ou $_.targetOU *>$null
-   Write-Host ('{ 0 }, { 1 }, { 2 }, CrOS OU Updated { 3 }>' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU, ('=' * 20)) -F Green
+   Write-Host ('{0}, {1}, {2}, CrOS OU Updated {3}>' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU, ('=' * 20)) -F Green
   }
   $_
  }
  end {
   if ($list.Count -gt 1) {
    $list | Out-File -FilePath $awardLog -Encoding utf8 -Force -Confirm:$false
-   Write-Host ('{ 0 }, Award log exported to: { 1 }' -f $MyInvocation.MyCommand.Name, $awardLog) -F Green
+   Write-Host ('{0}, Award log exported to: {1}' -f $MyInvocation.MyCommand.Name, $awardLog) -F Green
   }
  }
 }
@@ -266,10 +270,10 @@ $awardTable = Import-Csv -Path '.\csv\awardTable.csv'
 
 $tierData = $awardTable | Sort-Object -Property days -Descending | Format-TierObject |
  Set-LookBackDayCount -instance $sisInstance |
-  Set-TierCutOffDate |
-   Show-Object
+  Set-TierCutOffDate
+
 # Write-Host ($tierData | Out-String) -F Green
-exit
+# exit
 $schoolStartDate = Get-SchoolStartDate -instance $sisInstance
 
 $siSCrosDevices = Get-SiSCrosDevices -instance $sisInstance
