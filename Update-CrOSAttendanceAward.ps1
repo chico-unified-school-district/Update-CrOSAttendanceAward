@@ -26,11 +26,9 @@ function Format-TierObject {
  process {
   # Write-Verbose ($_ | Out-String)
   [PSCustomObject]@{
-   awardData       = $_
-   daysBack        = $null
-   studentFreeDays = $null
-   weekEndDays     = $null
-   cutOffDate      = $null
+   awardData        = $_
+   cutOffDate       = $null
+   lookBackDayCount = $null
   }
  }
 }
@@ -85,7 +83,7 @@ function Get-SiSCrosDevices ($instance) {
 
 function Get-SiSStudents ($instance, $siteCodes) {
  $siteCodeList = $siteCodes -join ','
- $studentQuery = (Get-Content -Path .\sql\sis-active-students.sql -Raw) -replace 'VALID_SITE_CODES', $siteCodeList
+ $studentQuery = (Get-Content -Path .\sql\sis-active-students2.sql -Raw) -replace 'VALID_SITE_CODES', $siteCodeList
  $sisStudentData = Invoke-DbaQuery -SqlInstance $instance -Query $studentQuery
  Write-Host ('{0},Count: {1}' -f $MyInvocation.MyCommand.Name, $sisStudentData.Count) -F Green
  $sisStudentData | ConvertTo-Csv | ConvertFrom-Csv
@@ -143,13 +141,6 @@ function Set-CrosDevice ($sisData, $gSuiteData) {
  }
 }
 
-function Set-DaysBack {
- process {
-  $_.daysBack = [int]$_.awardData.days + [int]$_.studentFreeDays + [int]$_.weekendDays
-  $_
- }
-}
-
 function Set-DefaultOU ($defaultOU) {
  process {
   $_.defaultOU = switch ($_.sis.SC) {
@@ -182,44 +173,42 @@ function Set-LatestTardyLookupSql {
  }
 }
 
-function Set-StudentFreeDays ($instance) {
- begin {
-  $sql = Get-Content -Path .\sql\sis-select-no-student-days.sql -Raw
- }
- process {
-  $days = [int]$_.awardData.days * -1
-  $sqlVars = "days=$days"
-  # Write-Verbose ('{0},Days: {1}' -f $MyInvocation.MyCommand.Name, $sqlVars)
-  $results = New-SqlOperation -Server $instance -Query $sql -Parameters $sqlVars
-  # Write-Verbose ($results | Out-String)
-  # Write-Host ('{0},Count: {1}' -f $MyInvocation.MyCommand.Name, @($results).Count) -F DarkBlue
-  $_.studentFreeDays = if ($results) { $results.count } else { 0 }
-  $_
- }
-}
-
 function Set-TierCutOffDate {
  process {
-  [int]$days = $_.daysBack * -1
-  $_.cutOffDate = (Get-Date 12:00AM).AddDays($days)
+  $_.cutOffDate = (Get-Date).AddDays($_.lookBackDayCount * -1)
   Write-Host ('{0},{1},{2:yyyy-MM-dd}' -f $MyInvocation.MyCommand.Name, $_.awardData.ou, $_.cutOffDate) -F Green
   $_
  }
 }
 
-function Set-WeekendDays {
+
+function Set-LookBackDayCount ($instance) {
+ begin {
+  $sql = Get-Content -Path '.\sql\sis-select-no-student-days.sql' -Raw
+  $noStudentDays = New-SqlOperation -Server $instance -Query $sql
+ }
  process {
-  $weekendCount = 0
-  for ($i = 0; $i -lt $_.awardData.days; $i++) {
-   # Subtract $i days from the current date
-   $date = (Get-Date).AddDays(-$i)
-   # Check if the DayOfWeek is Saturday or Sunday
-   if ($date.DayOfWeek -eq 'Saturday' -or $date.DayOfWeek -eq 'Sunday') {
-    $weekendCount++
+  $count = 1 # Start at 1 to account for the current day, which is evaluated in the loop.
+  $noSchoolDays = -1
+  $currentDateObj = Get-Date
+
+  do {
+   Write-Verbose ('{0},Evaluating date: {1}' -f $MyInvocation.MyCommand.Name, $currentDateObj)
+   $shortDate = $currentDateObj.ToString('yyyy-MM-dd')
+   if ($currentDateObj.DayOfWeek -eq 'Saturday' -or $currentDateObj.DayOfWeek -eq 'Sunday' -or ($noStudentDays.date -contains $shortDate)) {
+    if ($noStudentDays.date -contains $shortDate) { Write-Verbose $shortDate }
+    if ($currentDateObj.DayOfWeek -eq 'Saturday' -or $currentDateObj.DayOfWeek -eq 'Sunday') { Write-Verbose $shortDate }
+    $noSchoolDays++
    }
-  }
-  # Write-Host ('{0},Count: {1}' -f $MyInvocation.MyCommand.Name, $weekendCount) -F Blue
-  $_.weekendDays = $weekendCount
+   else {
+    Write-Verbose ('{0},Days Tier: [{1}],date: [{2}],Count: [{3}]' -f $MyInvocation.MyCommand.Name, $_.awardData.days, $shortDate, $count)
+    $count++
+   }
+   $currentDateObj = $currentDateObj.AddDays(-1)
+  } while ($count -lt $_.awardData.days)
+
+  $_.lookBackDayCount = [int]$noSchoolDays + [int]$_.awardData.days
+  Write-Verbose ('{0},Count: {1}' -f $MyInvocation.MyCommand.Name, $_.lookBackDayCount)
   $_
  }
 }
@@ -241,23 +230,23 @@ function Update-CrosOU {
 
   $awardLog = ".\log\award-log-$(Get-Date -f yyyy-MM-dd).csv"
   $list = New-Object System.Collections.Generic.List[string]
-  $list.Add('id,sn,ou')
+  $list.Add('date,id,sn,ou')
  }
  process {
   $msg = $MyInvocation.MyCommand.Name, $_.sis.ID, $_.cros.serialNumber, $_.cros.orgUnitPath, $_.targetOU
-  if ($_.cros.orgUnitPath.Trim() -eq $_.targetOU) { return }
+  if ($_.cros.orgUnitPath.Trim() -eq $_.targetOU) { return } # No need to update if OU is correct
   Write-Host ('{0},PermId: [{1}],SN: [{2}],Current OU:[{3}],New OU: [{4}]' -f $msg) -F Magenta
-  $list.Add("$($_.sis.ID),$($_.cros.serialNumber),$($_.targetOU)")
+  $list.Add("(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'),$($_.sis.ID),$($_.cros.serialNumber),$($_.targetOU)")
   if (!$WhatIf) {
    & $gam update cros $_.cros.deviceId ou $_.targetOU *>$null
-   Write-Host ('{0},{1},{2},CrOS OU Updated {3}>' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU, ('=' * 20)) -F Green
+   Write-Host ('{ 0 }, { 1 }, { 2 }, CrOS OU Updated { 3 }>' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU, ('=' * 20)) -F Green
   }
   $_
  }
  end {
   if ($list.Count -gt 1) {
    $list | Out-File -FilePath $awardLog -Encoding utf8 -Force -Confirm:$false
-   Write-Host ('{0},Award log exported to: {1}' -f $MyInvocation.MyCommand.Name, $awardLog) -F Green
+   Write-Host ('{ 0 }, Award log exported to: { 1 }' -f $MyInvocation.MyCommand.Name, $awardLog) -F Green
   }
  }
 }
@@ -276,25 +265,23 @@ $sisInstance = Connect-DbaInstance -SqlInstance $Server -Database $Database -Sql
 $awardTable = Import-Csv -Path '.\csv\awardTable.csv'
 
 $tierData = $awardTable | Sort-Object -Property days -Descending | Format-TierObject |
- Set-WeekendDays |
-  Set-StudentFreeDays -instance $sisInstance |
-   Set-DaysBack |
-    Set-TierCutOffDate
-# Show-Object
+ Set-LookBackDayCount -instance $sisInstance |
+  Set-TierCutOffDate |
+   Show-Object
 # Write-Host ($tierData | Out-String) -F Green
-
+exit
 $schoolStartDate = Get-SchoolStartDate -instance $sisInstance
 
 $siSCrosDevices = Get-SiSCrosDevices -instance $sisInstance
 $gSuiteCrosDevices = Get-GSuiteCrosDevices
 
 Get-SiSStudents -instance $sisInstance -siteCodes $ValidSiteCodes | Format-StudentObject |
- Set-CrosDevice -gSuiteData $gSuiteCrosDevices -sisData $siSCrosDevices |
-  Set-LatestTardyLookupSql |
-   Set-LatestTardyDate -instance $sisInstance |
-    Set-DefaultOU $DefaultCrosOrgUnit |
-     Set-AwardZone -tierArray $tierData -startDate $schoolStartDate -defaultOU |
-      Set-CrosDevice -sisData $siSCrosDevices -gSuiteData $gSuiteCrosDevices |
+ Set-DaysSinceEnrollment |
+  Set-CrosDevice -gSuiteData $gSuiteCrosDevices -sisData $siSCrosDevices |
+   Set-LatestTardyLookupSql |
+    Set-LatestTardyDate -instance $sisInstance |
+     Set-DefaultOU $DefaultCrosOrgUnit |
+      Set-AwardZone -tierArray $tierData -startDate $schoolStartDate |
        Update-CrosOU |
         Show-Object
 
