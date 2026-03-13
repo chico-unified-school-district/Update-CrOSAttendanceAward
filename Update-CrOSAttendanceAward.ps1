@@ -29,13 +29,12 @@ function Format-TierObject {
   [PSCustomObject]@{
    awardData  = $_
    cutOffDate = $null
-   # lookBackDayCount = $null
   }
  }
 }
 
 function Get-GSuiteCrosDevices {
-
+ # TODO For Testing only, remove caching and backdating for production use. Maybe add a parameter to control this.
  Write-Host ('{0},Removing old .csv (gSuite data) files...' -f $MyInvocation.MyCommand.Name) -F Cyan
  $deleteOlderThanDate = (Get-Date).AddDays(-1)
  $oldCSVs = Get-ChildItem -Path .\data\*.csv | Where-Object { ($_.LastWriteTime -le $deleteOlderThanDate) }
@@ -53,6 +52,7 @@ function Get-GSuiteCrosDevices {
   $ErrorActionPreference = 'Continue'
   ($results = & $gam print cros fields $fields query "sync:$backDate.." | ConvertFrom-Csv )*>$null
   $ErrorActionPreference = 'Stop'
+  # TODO
   $results | Export-Csv -Path $exportPath -NoTypeInformation
  }
  Write-Host ('{0},Count: {1}' -f $MyInvocation.MyCommand.Name, @($results).Count) -F Green
@@ -179,8 +179,6 @@ function Set-LatestTardyLookupSql {
 }
 
 function Set-TierCutOffDate ($instance) {
- begin {
- }
  process {
   $sql = (Get-Content -Path '.\sql\sis-select-cutoff-date.sql' -Raw) -replace '@count', $_.awardData.days
   $date = New-SqlOperation -Server $instance -Query $sql -Parameters "Count=$($_.awardData.days)" | Select-Object -ExpandProperty date
@@ -189,41 +187,6 @@ function Set-TierCutOffDate ($instance) {
   $_
  }
 }
-
-# function Set-TierCutOffDate {
-#  process {
-#   $_.cutOffDate = (Get-Date 5:00PM).AddDays($_.lookBackDayCount * -1)
-#   Write-Host ('{0},{1},{2},{3:yyyy-MM-dd}' -f $MyInvocation.MyCommand.Name, $_.awardData.ou, $_.lookBackDayCount, $_.cutOffDate) -F Green
-#   $_
-#  }
-# }
-
-# function Set-LookBackDayCount ($instance) {
-#  begin {
-#   $sql = Get-Content -Path '.\sql\sis-select-no-student-days.sql' -Raw
-#   $noStudentDays = New-SqlOperation -Server $instance -Query $sql
-#  }
-#  process {
-#   $count = 0
-#   $daysOff = 0
-#   $currentDateObj = Get-Date
-#   do {
-#    $shortDate = $currentDateObj.ToString('yyyy-MM-dd')
-#    if ($currentDateObj.DayOfWeek -eq 'Saturday' -or $currentDateObj.DayOfWeek -eq 'Sunday' -or ($noStudentDays.date -contains $shortDate)) {
-#     Write-Verbose "Day off: $shortDate"
-#     $daysOff++
-#    }
-#    else {
-#     $count++
-#     Write-Verbose ('{0},Days Tier: [{1}],date: [{2}],Count: [{3}]' -f $MyInvocation.MyCommand.Name, $_.awardData.days, $shortDate, $count)
-#    }
-#    $currentDateObj = $currentDateObj.AddDays(-1)
-#   } while ($count -lt $_.awardData.days)
-#   $_.lookBackDayCount = [int]$daysOff + [int]$_.awardData.days - 1
-#   Write-Verbose ('{0},Days Back: {1}' -f $MyInvocation.MyCommand.Name, $_.lookBackDayCount)
-#   $_
-#  }
-# }
 
 function Show-Object {
  process {
@@ -234,15 +197,14 @@ function Show-Object {
 
 function Update-CrosOU {
  begin {
+  New-Item -Path .\log -ItemType Directory -Force | Out-Null
+  $oldLogs = Get-ChildItem -Path .\log
   Write-Host ('{0},Removing old log files...' -f $MyInvocation.MyCommand.Name) -F Cyan
-  $deleteOlderThanDate = (Get-Date).AddDays(-1)
-  if (!(Test-Path -Path .\log)) { New-Item -Path .\log -ItemType Directory | Out-Null }
-  $oldLogs = Get-ChildItem -Path .\log\*.csv | Where-Object { ($_.LastWriteTime -le $deleteOlderThanDate) }
   $oldLogs | Remove-Item -Force -Confirm:$false
 
   $awardLog = ".\log\award-log-$(Get-Date -f yyyy-MM-dd).csv"
   $list = New-Object System.Collections.Generic.List[string]
-  $list.Add('date,id,sn,srcOU,targOU')
+  $list.Add('id,sn,srcOU,targOU')
  }
  process {
   $msg = $MyInvocation.MyCommand.Name, $_.sis.ID, $_.cros.serialNumber, $_.cros.orgUnitPath, $_.targetOU
@@ -276,25 +238,27 @@ $sisInstance = Connect-DbaInstance -SqlInstance $Server -Database $Database -Sql
 
 $awardTable = Import-Csv -Path '.\csv\awardTable.csv'
 
-$tierData = $awardTable | Sort-Object -Property days -Descending | Format-TierObject |
- # Set-LookBackDayCount -instance $sisInstance |
- Set-TierCutOffDate -instance $sisInstance
+$tierData = $awardTable |
+ Sort-Object -Property days -Descending |
+  Format-TierObject |
+   Set-TierCutOffDate -instance $sisInstance
 
 Write-Host ($tierData | Out-String) -F Green
-exit
+# exit
 $schoolStartDate = Get-SchoolStartDate -instance $sisInstance
 
 $siSCrosDevices = Get-SiSCrosDevices -instance $sisInstance
 $gSuiteCrosDevices = Get-GSuiteCrosDevices
 
-Get-SiSStudents -instance $sisInstance -siteCodes $ValidSiteCodes | Format-StudentObject |
- Set-DaysSinceEnrollment |
-  Set-CrosDevice -gSuiteData $gSuiteCrosDevices -sisData $siSCrosDevices |
-   Set-LatestTardyLookupSql |
-    Set-LatestTardyDate -instance $sisInstance |
-     Set-DefaultOU -ou $DefaultCrosOrgUnit |
-      Set-AwardZone -tierArray $tierData -startDate $schoolStartDate |
-       Update-CrosOU |
-        Show-Object
+Get-SiSStudents -instance $sisInstance -siteCodes $ValidSiteCodes |
+ Format-StudentObject |
+  Set-DaysSinceEnrollment |
+   Set-CrosDevice -gSuiteData $gSuiteCrosDevices -sisData $siSCrosDevices |
+    Set-LatestTardyLookupSql |
+     Set-LatestTardyDate -instance $sisInstance |
+      Set-DefaultOU -ou $DefaultCrosOrgUnit |
+       Set-AwardZone -tierArray $tierData -startDate $schoolStartDate |
+        Update-CrosOU |
+         Show-Object
 
 if ($WhatIf) { Show-TestRun }
