@@ -1,0 +1,13 @@
+-- DECLARE @count INT = 5;
+SELECT TOP 1 CONVERT(VARCHAR(10), synth.DT, 23) AS date
+FROM
+  (
+  SELECT DISTINCT TOP (@count) DT
+  FROM DAY
+  WHERE
+  T1 IS NULL OR T1 = ''
+  -- HO IS NULL OR HO = ''
+  AND DT <= GETDATE()
+  ORDER BY DT DESC
+  ) as synth
+ORDER BY synth.DT ASC;

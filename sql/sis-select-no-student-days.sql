@@ -1,5 +1,4 @@
 SELECT DISTINCT
 CONVERT(VARCHAR(10), DT, 23) as date from DAY
 WHERE
-HO IS NOT NULL AND HO <> ''
--- AND DT = @date
+T1 = ''  OR T1 IS NULL
