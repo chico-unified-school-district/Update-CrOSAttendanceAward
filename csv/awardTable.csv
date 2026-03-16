@@ -1,6 +1,7 @@
 days,ou
-05,/Chromebooks/1:1/AttStreak/5-day
-10,/Chromebooks/1:1/AttStreak/10-day
-30,/Chromebooks/1:1/AttStreak/30-day
-50,/Chromebooks/1:1/AttStreak/50-day
-80,/Chromebooks/1:1/AttStreak/80-day
+00,/AttStreak/0day
+05,/AttStreak/5day
+10,/AttStreak/10day
+30,/AttStreak/30day
+50,/AttStreak/50day
+80,/AttStreak/80day

@@ -5,6 +5,7 @@ param (
  [Parameter(Mandatory = $True)][System.Management.Automation.PSCredential]$Credential,
  [int[]]$ValidSiteCodes,
  [string]$DefaultCrosOrgUnit,
+ [string]$RootCrosOrgUnit,
  [switch]$CheckEachLoop,
  [Alias('wi')]
  [switch]$WhatIf
@@ -16,6 +17,7 @@ function Format-StudentObject {
    cros                = $null
    daysSinceEnrollment = $null
    latestTardyDate     = $null
+   rootOU              = $null
    sis                 = $_
    tardyLookupSql      = $null
    targetOU            = $null
@@ -108,10 +110,12 @@ function Set-AwardZone ($tierArray, $startDate) {
    }
    if (($_.latestTardyDate -le $tier.cutOffDate) -or ($_.latestTardyDate -isnot [datetime])) {
     Write-Host ('{0},{1},{2},{3}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.latestTardyDate, $tier.awardData.ou) -F Green
-    $_.targetOU = $tier.AwardData.ou # Update from default OU to award OU
+    $_.targetOU = $_.rootOU + $tier.AwardData.ou # Update from default OU to award OU
     return $_ # If we get a match, we can exit the loop and function early since tiers are ordered highest to lowest.
    }
   }
+  $_.targetOU = $_.rootOU # No award, set target OU to root/default OU
+  Write-Host ('{0},{1},No award tier matched. Target OU set to root OU: {2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU) -F Blue
   $_
  }
 }
@@ -146,16 +150,16 @@ function Set-DaysSinceEnrollment {
  }
 }
 
-function Set-DefaultOU ($ou) {
- process {
-  $_.targetOU = switch ($_.sis.SC) {
-   { $_ -in 5 } { '/Chromebooks/1:1' }
-   default { $ou }
-  }
-  Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU)
-  $_
- }
-}
+# function Set-DefaultOU ($ou) {
+#  process {
+#   $_.targetOU = switch ($_.sis.SC) {
+#    { $_ -in 5 } { '/Chromebooks/1:1' }
+#    default { $ou }
+#   }
+#   Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU)
+#   $_
+#  }
+# }
 
 function Set-LatestTardyDate($instance) {
  process {
@@ -174,6 +178,27 @@ function Set-LatestTardyLookupSql {
    default { throw ('{0},{1},Unknown SC: [{2}]' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.sis.SC) }
   }
   if (!$_.tardyLookupSql) { return }
+  $_
+ }
+}
+
+function Set-RootOU ($defaultRootOU) {
+ begin {
+  $specialOUs = Import-Csv -Path .\csv\special-ous.csv
+ }
+ process {
+  $specialOU = foreach ($entry in $specialOUs) {
+   if ($_.cros.OrgUnitPath -match $entry.ou) {
+    $entry.ou
+   }
+  }
+  $_.rootOU = if ($specialOU) {
+   $defaultRootOU + $specialOU
+  }
+  else {
+   $defaultRootOU
+  }
+  Write-Host ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.rootOU) -F Yellow
   $_
  }
 }
@@ -209,7 +234,7 @@ function Update-CrosOU {
  process {
   $msg = $MyInvocation.MyCommand.Name, $_.sis.ID, $_.cros.serialNumber, $_.cros.orgUnitPath, $_.targetOU
   if ($_.cros.orgUnitPath.Trim() -eq $_.targetOU) { return } # No need to update if OU is correct
-  Write-Host ('{0},PermId: [{1}],SN: [{2}],Current OU:[{3}],New OU: [{4}]' -f $msg) -F Magenta
+  Write-Host ('{0},PermId: [{1}],SN: [{2}],Current OU:[{3}],New OU:[{4}]' -f $msg) -F Magenta
   $list.Add("$($_.sis.ID),$($_.cros.serialNumber),$($_.cros.orgUnitPath),$($_.targetOU)")
   if (!$WhatIf) {
    & $gam update cros $_.cros.deviceId ou $_.targetOU *>$null
@@ -220,7 +245,7 @@ function Update-CrosOU {
  end {
   if ($list.Count -gt 1) {
    $list | Out-File -FilePath $awardLog -Encoding utf8 -Force -Confirm:$false
-   Write-Host ('{0}, Award log exported to: {1}' -f $MyInvocation.MyCommand.Name, $awardLog) -F Green
+   Write-Host ('{0},Award log exported to: {1}' -f $MyInvocation.MyCommand.Name, $awardLog) -F Green
   }
  }
 }
@@ -236,9 +261,7 @@ if ($WhatIf) { Write-Host (Show-TestRun) -F Blue }
 $gam = 'C:\GAM7\gam.exe'
 $sisInstance = Connect-DbaInstance -SqlInstance $Server -Database $Database -SqlCredential $Credential
 
-$awardTable = Import-Csv -Path '.\csv\awardTable.csv'
-
-$tierData = $awardTable |
+$tierData = Import-Csv -Path '.\csv\awardTable.csv' |
  Sort-Object -Property days -Descending |
   Format-TierObject |
    Set-TierCutOffDate -instance $sisInstance
@@ -256,7 +279,8 @@ Get-SiSStudents -instance $sisInstance -siteCodes $ValidSiteCodes |
    Set-CrosDevice -gSuiteData $gSuiteCrosDevices -sisData $siSCrosDevices |
     Set-LatestTardyLookupSql |
      Set-LatestTardyDate -instance $sisInstance |
-      Set-DefaultOU -ou $DefaultCrosOrgUnit |
+      # Set-DefaultOU -ou $DefaultCrosOrgUnit |
+      Set-RootOU -defaultRootOU $DefaultCrosOrgUnit |
        Set-AwardZone -tierArray $tierData -startDate $schoolStartDate |
         Update-CrosOU |
          Show-Object
