@@ -3,9 +3,9 @@ param (
  [Parameter(Mandatory = $True)][string]$Server,
  [Parameter(Mandatory = $True)][string]$Database,
  [Parameter(Mandatory = $True)][System.Management.Automation.PSCredential]$Credential,
- [int[]]$ValidSiteCodes,
- [string]$DefaultCrosOrgUnit,
- [string]$RootCrosOrgUnit,
+ [Parameter(Mandatory = $True)][int[]]$ValidSiteCodes,
+ [Parameter(Mandatory = $True)][string]$DefaultCrosOrgUnit,
+ # [string]$RootCrosOrgUnit,
  [switch]$CheckEachLoop,
  [Alias('wi')]
  [switch]$WhatIf
@@ -43,8 +43,8 @@ function Get-GSuiteCrosDevices {
  $oldCSVs | Remove-Item -Force -Confirm:$false
 
  $exportPath = ".\data\GSuite-Export-$(Get-Date -f yyyy-MM-dd).csv"
- if (Test-Path -Path $exportPath -and !$WhatIf) {
-   Write-Host ('{0},Importing GSuite Cros data from existing .csv file...' -f $MyInvocation.MyCommand.Name) -F Yellow
+ if ((Test-Path -Path $exportPath) -and ($WhatIf)) {
+  Write-Host ('{0},Importing GSuite Cros data from existing .csv file...' -f $MyInvocation.MyCommand.Name) -F Green
   $results = Import-Csv -Path $exportPath
  }
  else {
