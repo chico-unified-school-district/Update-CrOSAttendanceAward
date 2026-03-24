@@ -1,5 +1,5 @@
 -- DECLARE @count INT = 5;
-SELECT TOP 1 CONVERT(VARCHAR(10), synth.DT, 23) AS date
+SELECT TOP 1 CONVERT(VARCHAR(10), topX.DT, 23) AS date
 FROM
   (
   SELECT DISTINCT TOP (@count) DT
@@ -9,5 +9,5 @@ FROM
   -- HO IS NULL OR HO = ''
   AND DT <= GETDATE()
   ORDER BY DT DESC
-  ) as synth
-ORDER BY synth.DT ASC;
+  ) as topX
+ORDER BY topX.DT ASC;

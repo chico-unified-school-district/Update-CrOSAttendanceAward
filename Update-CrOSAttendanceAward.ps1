@@ -43,7 +43,8 @@ function Get-GSuiteCrosDevices {
  $oldCSVs | Remove-Item -Force -Confirm:$false
 
  $exportPath = ".\data\GSuite-Export-$(Get-Date -f yyyy-MM-dd).csv"
- if (Test-Path -Path $exportPath) {
+ if (Test-Path -Path $exportPath -and !$WhatIf) {
+   Write-Host ('{0},Importing GSuite Cros data from existing .csv file...' -f $MyInvocation.MyCommand.Name) -F Yellow
   $results = Import-Csv -Path $exportPath
  }
  else {
@@ -108,14 +109,14 @@ function Set-AwardZone ($tierArray, $startDate) {
     Write-Verbose ( '{0},{1},{2} > {3}, Enrollment too fresh for tier {4} ||||||||||' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $dateSinceEnr, $tier.cutOffDate, $tier.awardData.ou )
     continue
    }
-   if (($_.latestTardyDate -le $tier.cutOffDate) -or ($_.latestTardyDate -isnot [datetime])) {
+   if (($_.latestTardyDate -lt $tier.cutOffDate) -or ($_.latestTardyDate -isnot [datetime])) {
     Write-Host ('{0},{1},{2},{3}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.latestTardyDate, $tier.awardData.ou) -F Green
     $_.targetOU = $_.rootOU + $tier.AwardData.ou # Update from default OU to award OU
     return $_ # If we get a match, we can exit the loop and function early since tiers are ordered highest to lowest.
    }
   }
-  $_.targetOU = $_.rootOU # No award, set target OU to root/default OU
-  Write-Host ('{0},{1},No award tier matched. Target OU set to root OU: {2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU) -F Blue
+  $_.targetOU = $_.rootOU + $tierArray[-1].AwardData.ou # No award, set target OU to 0 day OU
+  Write-Host ('{0},{1},No award tier matched. Target OU set to Restart Day OU: {2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU) -F Blue
   $_
  }
 }
@@ -165,7 +166,10 @@ function Set-LatestTardyDate($instance) {
  process {
   $sql = Get-Content -Path $_.tardyLookupSql -Raw
   $data = New-SqlOperation -Server $instance -Query $sql -Parameters "permId=$($_.sis.ID)"
-  $_.latestTardyDate = if ($data.DT -match '\d{4}') { Get-Date $data.DT } else { $null }
+  # Set tardy date to 11:59pm of that day to ensure that any tardies on the cut-off date will be included in the award zone evaluation.
+  # This is because the award zone evaluation is looking for any tardies that are greater than the cut-off date,
+  # so if a student had a tardy on the cut-off date and we set the time to 12:00am, it would not be included in the evaluation.
+  $_.latestTardyDate = if ($data.DT -match '\d{4}') { (Get-Date $data.DT).Date.AddDays(1).AddSeconds(-1) } else { $null }
   Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.latestTardyDate)
   $_
  }
@@ -229,13 +233,13 @@ function Update-CrosOU {
 
   $awardLog = ".\log\award-log-$(Get-Date -f yyyy-MM-dd).csv"
   $list = New-Object System.Collections.Generic.List[string]
-  $list.Add('id,sn,srcOU,targOU')
+  $list.Add('id,sn,srcOU,targOU,lastTardyDate')
  }
  process {
   $msg = $MyInvocation.MyCommand.Name, $_.sis.ID, $_.cros.serialNumber, $_.cros.orgUnitPath, $_.targetOU
   if ($_.cros.orgUnitPath.Trim() -eq $_.targetOU) { return } # No need to update if OU is correct
   Write-Host ('{0},PermId: [{1}],SN: [{2}],Current OU:[{3}],New OU:[{4}]' -f $msg) -F Magenta
-  $list.Add("$($_.sis.ID),$($_.cros.serialNumber),$($_.cros.orgUnitPath),$($_.targetOU)")
+  $list.Add("$($_.sis.ID),$($_.cros.serialNumber),$($_.cros.orgUnitPath),$($_.targetOU),$($_.latestTardyDate)")
   if (!$WhatIf) {
    & $gam update cros $_.cros.deviceId ou $_.targetOU *>$null
    Write-Host ('{0}, {1}, {2}, CrOS OU Updated {3}>' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU, ('=' * 20)) -F Green
@@ -267,6 +271,7 @@ $tierData = Import-Csv -Path '.\csv\awardTable.csv' |
    Set-TierCutOffDate -instance $sisInstance
 
 Write-Host ($tierData | Out-String) -F Green
+if ($WhatIf) { Start-Sleep -Seconds 5`  }
 # exit
 $schoolStartDate = Get-SchoolStartDate -instance $sisInstance
 
