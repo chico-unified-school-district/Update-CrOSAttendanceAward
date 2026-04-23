@@ -1,7 +1,8 @@
 SELECT
  s.ID,
  s.SC,
- CONVERT(VARCHAR(10), topEnr.ED, 23) as ED
+ CONVERT(VARCHAR(10), topEnr.ED, 23) as ED,
+ s.SN
  -- ,s.GR
  -- ,s.LN
  -- ,s.FN

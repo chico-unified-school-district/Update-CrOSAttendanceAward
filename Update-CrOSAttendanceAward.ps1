@@ -5,6 +5,7 @@ param (
  [Parameter(Mandatory = $True)][System.Management.Automation.PSCredential]$Credential,
  [Parameter(Mandatory = $True)][int[]]$ValidSiteCodes,
  [Parameter(Mandatory = $True)][string]$DefaultCrosOrgUnit,
+ [Parameter(Mandatory = $True)][string]$NoTardiesOrgUnit,
  # [string]$RootCrosOrgUnit,
  [switch]$CheckEachLoop,
  [Alias('wi')]
@@ -93,30 +94,37 @@ function Get-SiSStudents ($instance, $siteCodes) {
  $sisStudentData | ConvertTo-Csv | ConvertFrom-Csv
 }
 
-function Set-AwardZone ($tierArray, $startDate) {
+function Set-AwardZone ($tierArray, $startDate, $noTardiesOu) {
  begin {
   $firstDaySchoolDate = Get-Date $startDate
  }
  process {
+
+  # TODO Rewrite using just whole integers instead of stupid dates!
+
+  # If no tardy date detected the set to GOAT and move on to next step
+  if ($_.latestTardyDate -isnot [datetime]) {
+   $_.targetOU = $_.rootOU + $noTardiesOu
+   return $_
+  }
+
   $dateSinceEnr = (Get-Date 5:00PM).AddDays($_.daysSinceEnrollment * -1)
-  # Tiers being ordered highest to lowest required.
+
   foreach ($tier in $tierArray) {
+   # $tiersArray MUST be ordered highest to lowest.
    if ($tier.cutOffDate -lt $firstDaySchoolDate) {
-    Write-Verbose ( '{0},{1} > {2}, Too early in the school year.=============>' -f $MyInvocation.MyCommand.Name, $tier.cutOffDate, $firstDaySchoolDate, $tier.awardData.ou )
-    continue
+    $_.targetOU = $_.rootOU + $noTardiesOu
+    return $_
    }
    if ($dateSinceEnr -gt $tier.cutOffDate) {
-    Write-Verbose ( '{0},{1},{2} > {3}, Enrollment too fresh for tier {4} ||||||||||' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $dateSinceEnr, $tier.cutOffDate, $tier.awardData.ou )
-    continue
+    $_.targetOU = $_.rootOU + $noTardiesOu
    }
-   if (($_.latestTardyDate -lt $tier.cutOffDate) -or ($_.latestTardyDate -isnot [datetime])) {
-    Write-Host ('{0},{1},{2},{3}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.latestTardyDate, $tier.awardData.ou) -F Green
-    $_.targetOU = $_.rootOU + $tier.AwardData.ou # Update from default OU to award OU
+   if ($_.latestTardyDate -lt $tier.cutOffDate) {
+    $_.targetOU = $_.rootOU + $tier.AwardData.ou
     return $_ # If we get a match, we can exit the loop and function early since tiers are ordered highest to lowest.
    }
   }
   $_.targetOU = $_.rootOU + $tierArray[-1].AwardData.ou # No award, set target OU to 0 day OU
-  Write-Host ('{0},{1},No award tier matched. Target OU set to Restart Day OU: {2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU) -F Blue
   $_
  }
 }
@@ -165,7 +173,8 @@ function Set-DaysSinceEnrollment {
 function Set-LatestTardyDate($instance) {
  process {
   $sql = Get-Content -Path $_.tardyLookupSql -Raw
-  $data = New-SqlOperation -Server $instance -Query $sql -Parameters "permId=$($_.sis.ID)"
+  # $data = New-SqlOperation -Server $instance -Query $sql -Parameters "permId=$($_.sis.ID)"
+  $data = New-SqlOperation -Server $instance -Query $sql -Parameters "sn=$($_.sis.SN)"
   # Set tardy date to 11:59pm of that day to ensure that any tardies on the cut-off date will be included in the award zone evaluation.
   # This is because the award zone evaluation is looking for any tardies that are greater than the cut-off date,
   # so if a student had a tardy on the cut-off date and we set the time to 12:00am, it would not be included in the evaluation.
@@ -178,7 +187,7 @@ function Set-LatestTardyDate($instance) {
 function Set-LatestTardyLookupSql {
  process {
   $_.tardyLookupSql = switch ($_.sis.SC) {
-   { $_ -in 5 } { '.\sql\sis-tardy-lookup-middle-school.sql' }
+   { $_ -in 5 } { '.\sql\sis-tardy-lookup-middle-school-full-day.sql' }
    default { throw ('{0},{1},Unknown SC: [{2}]' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.sis.SC) }
   }
   if (!$_.tardyLookupSql) { return }
@@ -202,7 +211,7 @@ function Set-RootOU ($defaultRootOU) {
   else {
    $defaultRootOU
   }
-  Write-Host ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.rootOU) -F Yellow
+  Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.rootOU)
   $_
  }
 }
@@ -237,12 +246,12 @@ function Update-CrosOU {
  }
  process {
   $msg = $MyInvocation.MyCommand.Name, $_.sis.ID, $_.cros.serialNumber, $_.cros.orgUnitPath, $_.targetOU
-  if ($_.cros.orgUnitPath.Trim() -eq $_.targetOU) { return } # No need to update if OU is correct
-  Write-Host ('{0},PermId: [{1}],SN: [{2}],Current OU:[{3}],New OU:[{4}]' -f $msg) -F Magenta
+  Write-Host ('{0},PermId:[{1}],SN:[{2}],Current OU:[{3}],New OU:[{4}]' -f $msg) -F Magenta
   $list.Add("$($_.sis.ID),$($_.cros.serialNumber),$($_.cros.orgUnitPath),$($_.targetOU),$($_.latestTardyDate)")
+  if ($_.cros.orgUnitPath.Trim() -eq $_.targetOU) { return } # No need to update if OU is correct
   if (!$WhatIf) {
    & $gam update cros $_.cros.deviceId ou $_.targetOU *>$null
-   Write-Host ('{0}, {1}, {2}, CrOS OU Updated {3}>' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU, ('=' * 20)) -F Green
+   Write-Host ('{0},[{1}],[{2}],CrOS OU Updated {3}>' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU, ('=' * 20)) -F Green
   }
   $_
  }
@@ -284,9 +293,9 @@ Get-SiSStudents -instance $sisInstance -siteCodes $ValidSiteCodes |
    Set-CrosDevice -gSuiteData $gSuiteCrosDevices -sisData $siSCrosDevices |
     Set-LatestTardyLookupSql |
      Set-LatestTardyDate -instance $sisInstance |
-      # Set-DefaultOU -ou $DefaultCrosOrgUnit |
+      # # Set-DefaultOU -ou $DefaultCrosOrgUnit |
       Set-RootOU -defaultRootOU $DefaultCrosOrgUnit |
-       Set-AwardZone -tierArray $tierData -startDate $schoolStartDate |
+       Set-AwardZone -tierArray $tierData -startDate $schoolStartDate -noTardiesOu $NoTardiesOrgUnit |
         Update-CrosOU |
          Show-Object
 
