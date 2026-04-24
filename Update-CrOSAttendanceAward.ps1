@@ -16,8 +16,7 @@ function Format-StudentObject {
  process {
   [PSCustomObject]@{
    cros                = $null
-   daysSinceEnrollment = $null
-   latestTardyDate     = $null
+   lastTardyDays       = $null
    rootOU              = $null
    sis                 = $_
    tardyLookupSql      = $null
@@ -31,7 +30,7 @@ function Format-TierObject {
   # Write-Verbose ($_ | Out-String)
   [PSCustomObject]@{
    awardData  = $_
-   cutOffDate = $null
+   cutOffDays = $null
   }
  }
 }
@@ -63,22 +62,6 @@ function Get-GSuiteCrosDevices {
  $results
 }
 
-function Get-SchoolStartDate ($instance) {
- $sql = Get-Content -Path .\sql\sis-select-first-day-of-school.sql -Raw
- $result = New-SqlOperation -Server $instance -Query $sql
- if ($result.date -notmatch '\d{4}') {
-  Write-Error ('{0},School start date lookup error. Exiting.' -f $MyInvocation.MyCommand.Name)
-  exit
- }
- $startDate = Get-Date $result.date
- if ($startDate -isnot [datetime]) {
-  Write-Error ('{0}' -f $MyInvocation.MyCommand.Name)
-  exit
- }
- Write-Host ('{0},{1}' -f $MyInvocation.MyCommand.Name, $startDate) -F Green
- $startDate
-}
-
 function Get-SiSCrosDevices ($instance) {
  $sql = Get-Content -Path '.\sql\sis-get-cros.sql' -Raw
  $results = New-SqlOperation -Server $instance -Query $sql
@@ -94,38 +77,20 @@ function Get-SiSStudents ($instance, $siteCodes) {
  $sisStudentData | ConvertTo-Csv | ConvertFrom-Csv
 }
 
-function Set-AwardZone ($tierArray, $startDate, $noTardiesOu) {
- begin {
-  $firstDaySchoolDate = Get-Date $startDate
- }
+function Set-AwardZoneOU ($tiers) {
  process {
-
-  # TODO Rewrite using just whole integers instead of stupid dates!
-
-  # If no tardy date detected the set to GOAT and move on to next step
-  if ($_.latestTardyDate -isnot [datetime]) {
-   $_.targetOU = $_.rootOU + $noTardiesOu
-   return $_
-  }
-
-  $dateSinceEnr = (Get-Date 5:00PM).AddDays($_.daysSinceEnrollment * -1)
-
-  foreach ($tier in $tierArray) {
-   # $tiersArray MUST be ordered highest to lowest.
-   if ($tier.cutOffDate -lt $firstDaySchoolDate) {
-    $_.targetOU = $_.rootOU + $noTardiesOu
-    return $_
-   }
-   if ($dateSinceEnr -gt $tier.cutOffDate) {
-    $_.targetOU = $_.rootOU + $noTardiesOu
-   }
-   if ($_.latestTardyDate -lt $tier.cutOffDate) {
-    $_.targetOU = $_.rootOU + $tier.AwardData.ou
-    return $_ # If we get a match, we can exit the loop and function early since tiers are ordered highest to lowest.
+  if ($_.targetOU) { return $_ } # Skip if already set.
+  # Best if tiers are sorted highest days to lowest
+  $myTier = foreach ($tier in $tiers) {
+   if ($_.lastTardyDays -gt $tier.cutOffDays) {
+    $tier
+    break
    }
   }
-  $_.targetOU = $_.rootOU + $tierArray[-1].AwardData.ou # No award, set target OU to 0 day OU
-  $_
+  $msg = $MyInvocation.MyCommand.Name, $_.sis.ID, $myTier.cutOffDays, $myTier.awardData.ou
+  Write-Verbose ('{0},[{1}],CutOff Days: [{2}],Zone: [{3}]' -f $msg)
+  $_.targetOU = $_.rootOU + $myTier.awardData.ou
+  return $_
  }
 }
 
@@ -151,36 +116,31 @@ function Set-CrosDevice ($sisData, $gSuiteData) {
  }
 }
 
-function Set-DaysSinceEnrollment {
+function Set-GoatOU ($ou) {
  process {
-  $_.daysSinceEnrollment = New-TimeSpan -Start (Get-Date $_.sis.ED) -End (Get-Date) | Select-Object -ExpandProperty Days
-  # Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.daysSinceEnrollment)
-  $_
+  # If no tardy date detected the set targetOU to GOAT. LET'S GOOOO!!!!
+  if ($_.lastTardyDays -isnot [int]) {
+   $_.targetOU = $_.rootOU + $ou
+   Write-Information -MessageData "$($MyInvocation.MyCommand.Name),$($_.sis.ID),GOATED!" -InformationAction Continue
+  }
+  return $_
  }
 }
 
-# function Set-DefaultOU ($ou) {
-#  process {
-#   $_.targetOU = switch ($_.sis.SC) {
-#    { $_ -in 5 } { '/Chromebooks/1:1' }
-#    default { $ou }
-#   }
-#   Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU)
-#   $_
-#  }
-# }
-
-function Set-LatestTardyDate($instance) {
+function Set-LastTardyDays ($instance) {
+ begin {
+  $endOfDay = Get-Date 5PM
+ }
  process {
   $sql = Get-Content -Path $_.tardyLookupSql -Raw
-  # $data = New-SqlOperation -Server $instance -Query $sql -Parameters "permId=$($_.sis.ID)"
   $data = New-SqlOperation -Server $instance -Query $sql -Parameters "sn=$($_.sis.SN)"
   # Set tardy date to 11:59pm of that day to ensure that any tardies on the cut-off date will be included in the award zone evaluation.
   # This is because the award zone evaluation is looking for any tardies that are greater than the cut-off date,
   # so if a student had a tardy on the cut-off date and we set the time to 12:00am, it would not be included in the evaluation.
-  $_.latestTardyDate = if ($data.DT -match '\d{4}') { (Get-Date $data.DT).Date.AddDays(1).AddSeconds(-1) } else { $null }
-  Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.latestTardyDate)
-  $_
+  $_.lastTardyDays = if ($data.DT -match '\d{4}') { ($endOfDay - (Get-Date $data.DT).AddDays(1).AddSeconds(-1)).days }
+  if (($_.lastTardyDays -is [int]) -and ($_.lastTardyDays -lt 1)) { $_.lastTardyDays = 1 } # Round up to 1 when less than 1
+  Write-Verbose ('{0},{1},[{2}],[{3}]' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.lastTardyDays, $data.DT)
+  return $_
  }
 }
 
@@ -195,7 +155,7 @@ function Set-LatestTardyLookupSql {
  }
 }
 
-function Set-RootOU ($defaultRootOU) {
+function Set-RootOU ($ou) {
  begin {
   $specialOUs = Import-Csv -Path .\csv\special-ous.csv
  }
@@ -206,29 +166,30 @@ function Set-RootOU ($defaultRootOU) {
    }
   }
   $_.rootOU = if ($specialOU) {
-   $defaultRootOU + $specialOU
+   $ou + $specialOU
   }
   else {
-   $defaultRootOU
+   $ou
   }
   Write-Verbose ('{0},{1},{2}' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.rootOU)
   $_
  }
 }
 
-function Set-TierCutOffDate ($instance) {
+function Set-TierCutOffDays ($instance, $today) {
  process {
   $sql = (Get-Content -Path '.\sql\sis-select-cutoff-date.sql' -Raw) -replace '@count', $_.awardData.days
   $date = New-SqlOperation -Server $instance -Query $sql -Parameters "Count=$($_.awardData.days)" | Select-Object -ExpandProperty date
-  $_.cutOffDate = Get-Date "$date 5:00PM"
-  Write-Verbose ('{0},{1},{2},{3:yyyy-MM-dd}' -f $MyInvocation.MyCommand.Name, $_.awardData.ou, $_.lookBackDayCount, $_.cutOffDate)
+  # TODO maybe offset time to ensure proper count
+  $_.cutOffDays = ($today - (Get-Date "$date 5:00PM")).days
+  # Write-Verbose ('{0},{1},{2},{3:yyyy-MM-dd}' -f $MyInvocation.MyCommand.Name, $_.awardData.ou, $_.lookBackDayCount, $_.cutOffDays)
   $_
  }
 }
 
 function Show-Object {
  process {
-  Write-Verbose ($MyInvocation.MyCommand.Name, $_ | Out-String)
+  Write-Verbose ($MyInvocation.MyCommand.Name, $_, '=============================' | Out-String)
   if ($CheckEachLoop) { Read-Host 'eh?' }
  }
 }
@@ -242,15 +203,16 @@ function Update-CrosOU {
 
   $awardLog = ".\log\award-log-$(Get-Date -f yyyy-MM-dd).csv"
   $list = New-Object System.Collections.Generic.List[string]
-  $list.Add('id,sn,srcOU,targOU,lastTardyDate')
+  $list.Add('id,sn,srcOU,targOU,daysSinceTardy')
  }
  process {
   $msg = $MyInvocation.MyCommand.Name, $_.sis.ID, $_.cros.serialNumber, $_.cros.orgUnitPath, $_.targetOU
   Write-Host ('{0},PermId:[{1}],SN:[{2}],Current OU:[{3}],New OU:[{4}]' -f $msg) -F Magenta
-  $list.Add("$($_.sis.ID),$($_.cros.serialNumber),$($_.cros.orgUnitPath),$($_.targetOU),$($_.latestTardyDate)")
-  if ($_.cros.orgUnitPath.Trim() -eq $_.targetOU) { return } # No need to update if OU is correct
+  $list.Add("$($_.sis.ID),$($_.cros.serialNumber),$($_.cros.orgUnitPath),$($_.targetOU),$($_.lastTardyDays)")
+  if ($_.cros.orgUnitPath.Trim() -eq $_.targetOU) { return $_ } # No need to update if OU is correct
   if (!$WhatIf) {
-   & $gam update cros $_.cros.deviceId ou $_.targetOU *>$null
+   & $gam redirect stderr null update cros $_.cros.deviceId ou $_.targetOU
+   # & $gam update cros $_.cros.deviceId ou $_.targetOU *>$null
    Write-Host ('{0},[{1}],[{2}],CrOS OU Updated {3}>' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.targetOU, ('=' * 20)) -F Green
   }
   $_
@@ -264,39 +226,38 @@ function Update-CrosOU {
 }
 
 # ==================== Main =====================
-# Imported Functions
 Import-Module -Name dbatools -Cmdlet Invoke-DbaQuery, Set-DbatoolsConfig, Connect-DbaInstance, Disconnect-DbaInstance
 Import-Module -Name CommonScriptFunctions
+
 Show-BlockInfo main
 Clear-SessionData
 if ($WhatIf) { Write-Host (Show-TestRun) -F Blue }
 
 $gam = 'C:\GAM7\gam.exe'
 $sisInstance = Connect-DbaInstance -SqlInstance $Server -Database $Database -SqlCredential $Credential
+$endOfSchoolDay = Get-Date 5PM
 
 $tierData = Import-Csv -Path '.\csv\awardTable.csv' |
  Sort-Object -Property days -Descending |
   Format-TierObject |
-   Set-TierCutOffDate -instance $sisInstance
+   Set-TierCutOffDays -instance $sisInstance -today $endOfSchoolDay
 
 Write-Host ($tierData | Out-String) -F Green
-if ($WhatIf) { Start-Sleep -Seconds 5`  }
+if ($WhatIf) { Start-Sleep -Seconds 5 }
 # exit
-$schoolStartDate = Get-SchoolStartDate -instance $sisInstance
 
 $siSCrosDevices = Get-SiSCrosDevices -instance $sisInstance
 $gSuiteCrosDevices = Get-GSuiteCrosDevices
 
 Get-SiSStudents -instance $sisInstance -siteCodes $ValidSiteCodes |
  Format-StudentObject |
-  Set-DaysSinceEnrollment |
    Set-CrosDevice -gSuiteData $gSuiteCrosDevices -sisData $siSCrosDevices |
     Set-LatestTardyLookupSql |
-     Set-LatestTardyDate -instance $sisInstance |
-      # # Set-DefaultOU -ou $DefaultCrosOrgUnit |
-      Set-RootOU -defaultRootOU $DefaultCrosOrgUnit |
-       Set-AwardZone -tierArray $tierData -startDate $schoolStartDate -noTardiesOu $NoTardiesOrgUnit |
-        Update-CrosOU |
-         Show-Object
+     Set-LastTardyDays -instance $sisInstance |
+      Set-RootOU -ou $DefaultCrosOrgUnit |
+       Set-GoatOU -ou $NoTardiesOrgUnit |
+        Set-AwardZoneOU -tiers $tierData |
+         Update-CrosOU |
+          Show-Object
 
 if ($WhatIf) { Show-TestRun }

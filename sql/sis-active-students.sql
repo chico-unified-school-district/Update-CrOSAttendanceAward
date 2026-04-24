@@ -1,4 +1,5 @@
 SELECT
+-- TOP 20
  s.ID,
  s.SC,
  CONVERT(VARCHAR(10), topEnr.ED, 23) as ED,
@@ -26,5 +27,5 @@ WHERE
 AND s.SC IN ( 5 )
 -- AND s.SC IN ( VALID_SITE_CODES )
 AND ( (s.DEL = 0) OR (s.DEL IS NULL) ) AND  ( s.TG = ' ' )
--- AND s.ID = 12345 -- For testing
+-- AND s.ID IN (12345) -- For testing
 ORDER by s.ID;
