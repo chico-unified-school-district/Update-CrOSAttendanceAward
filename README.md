@@ -1,233 +1,164 @@
 # Update-CrOSAttendanceAward
 
-Automates Chromebook OU assignment based on student tardy streaks.
+Automates ChromeOS device OU assignment based on student attendance/tardy data from SIS.
 
-The script:
+## What This Process Does
 
-- reads active students from SIS (SQL Server)
-- matches students to assigned Chromebook serials in SIS
-- matches SIS serials to Google Admin ChromeOS devices (via GAM)
-- calculates attendance award eligibility windows (including weekends and no-student days)
-- moves each device into the correct award OU (or default OU)
-- logs all OU changes to a dated CSV
+The main script:
 
----
+- pulls assigned Chromebook data from SIS
+- pulls active students filtered by site code
+- exports ChromeOS devices from Google Admin (GAM), with daily CSV caching
+- determines each student's latest tardy date
+- maps each student/device to a target OU based on tier cutoffs
+- applies OU updates in Google Admin (unless running in WhatIf mode)
+- writes a dated CSV log of evaluated records
 
 ## Repository Layout
 
-- `Update-CrOSAttendanceAward.ps1` main process script
-- `params.ps1` local/CI parameter hashtable and helper setup
-- `jenkins.ps1` Jenkins entry script placeholder
-- `csv/awardTable.csv` award tiers (`days,ou`) — `ou` is a relative path appended to the root OU
-- `csv/special-ous.csv` special-case OU suffixes applied to specific devices before award tiering
-- `sql/` SQL queries used by the process
-- `data/` cached GAM exports (`GSuite-Export-yyyy-MM-dd.csv`)
-- `log/` OU-change logs (`award-log-yyyy-MM-dd.csv`)
-
----
+- Update-CrOSAttendanceAward.ps1: main process script
+- params.ps1: local/CI parameter hashtable setup
+- jenkins.ps1: Jenkins entry script
+- csv/awardTable.csv: attendance tiers (days, ou)
+- csv/special-ous.csv: optional OU suffix rules
+- sql/: SQL files (active and historical)
+- sql/unused/: archived SQL not used by main process
+- data/: cached GAM exports
+- log/: run logs
 
 ## Prerequisites
 
-### 1) PowerShell + Modules
+### 1) PowerShell Modules
 
 Required modules:
 
-- `dbatools` (uses `Invoke-DbaQuery`, `Connect-DbaInstance`, etc.)
-- `CommonScriptFunctions` (environment-specific shared functions used by this script)
+- dbatools
+- CommonScriptFunctions
 
 ### 2) GAM7
 
-This script expects GAM at:
+Expected path in script:
 
-- `C:\GAM7\gam.exe`
+- C:\GAM7\gam.exe
 
-It uses GAM to read/update ChromeOS device org units.
+The GAM account must be authorized to read and update ChromeOS devices.
 
 ### 3) SQL Access
 
 You need:
 
 - SQL Server name
-- Database name
-- credential with permission to run the queries in `sql/`
+- database name
+- credential with permission to run the SQL in sql/
 
-### 4) Google Admin Permissions
+## Parameters
 
-The GAM account must be able to:
+Update-CrOSAttendanceAward.ps1 parameters:
 
-- list ChromeOS devices
-- move ChromeOS devices between OUs
+- Server (required)
+- Database (required)
+- Credential (required PSCredential)
+- ValidSiteCodes (required int[])
+- DefaultCrosOrgUnit (required)
+- NoTardiesOrgUnit (required)
+- CheckEachLoop (switch)
+- WhatIf / wi (switch)
 
----
-
-## Configuration
-
-### Award Tiers
-
-Edit `csv/awardTable.csv`:
-
-```csv
-days,ou
-00,/AttStreak/0day
-05,/AttStreak/5day
-10,/AttStreak/10day
-30,/AttStreak/30day
-50,/AttStreak/50day
-80,/AttStreak/80day
-```
-
-Rules:
-
-- sort order is handled in script (`days` descending)
-- `ou` is a **relative path** — it is appended to the root OU at runtime (see `Set-RootOU` and `-DefaultCrosOrgUnit`)
-- `ou` must correspond to a valid child OU under the root OU in Google Admin
-
-### Special OUs
-
-Edit `csv/special-ous.csv` to define OU suffixes that are inserted between the root OU and the award tier OU for qualifying devices:
-
-```csv
-ou,description
-/Student - Unrestricted WiFi Access,used for students living in close proximity to a school campus who require access to the school's WiFi network
-```
-
-At runtime, `Set-RootOU` checks each device's current `orgUnitPath` against every entry in this file. If a match is found, the special OU suffix is appended to `-DefaultCrosOrgUnit` to form the root OU for that device. This ensures special-case devices retain their sub-OU prefix when award tiers are applied.
-
-### Runtime Parameters
-
-`Update-CrOSAttendanceAward.ps1` parameters:
-
-- `-Server` (required)
-- `-Database` (required)
-- `-Credential` (required, `PSCredential`)
-- `-ValidSiteCodes` (`int[]`)
-- `-DefaultCrosOrgUnit` (root OU base path; award tier and special-OU suffixes are appended to this)
-- `-RootCrosOrgUnit` (reserved parameter, defined but not yet wired into the pipeline)
-- `-CheckEachLoop` (switch; pauses execution with `Read-Host` after each student object for step-through debugging)
-- `-WhatIf` / `-wi` (dry run mode)
-
-### Example `params.ps1`
+Example params.ps1:
 
 ```powershell
 $global:params = @{
  Server             = $SISServer
  Database           = $SISDB
- Credential         = $SiSCred
- ValidSiteCodes     = 1,2,3,4,5
- DefaultCrosOrgUnit = '/Chromebooks/'
+ Credential         = $AeriesCloudJenkins
+ ValidSiteCodes     = 1,2,3
+ DefaultCrosOrgUnit = '/Chromebooks'
+ NoTardiesOrgUnit   = '/NoTardies'
 }
 Get-ChildItem -Path .\*.ps1 | Unblock-File -Confirm:$false
 $params
 ```
 
----
+## Run
 
-## Run the Process
-
-From repo root:
-
-### Dry Run (recommended first)
+Dry run first:
 
 ```powershell
 .\params.ps1
 .\Update-CrOSAttendanceAward.ps1 @params -wi -ErrorAction Stop
 ```
 
-### Live Run (applies OU updates)
+Live run:
 
 ```powershell
 .\params.ps1
 .\Update-CrOSAttendanceAward.ps1 @params -ErrorAction Stop
 ```
 
-`-wi` shows intended changes but does **not** run:
+## Main Pipeline
 
-- `gam update cros <deviceId> ou <targetOU>`
+1. Connect to SIS SQL instance.
+2. Load tier rules from csv/awardTable.csv and compute per-tier cutoff days using sql/sis-select-cutoff-date.sql.
+3. Pull SIS device assignments (sql/sis-get-cros.sql).
+4. Pull SIS active students (sql/sis-active-students.sql, with VALID_SITE_CODES replaced at runtime).
+5. Pull Google ChromeOS devices through GAM (or reuse same-day CSV in WhatIf mode).
+6. For each student record:
+   - match SIS device assignment to Google serial number
+   - pick tardy lookup SQL by site code (currently SC 5 only)
+   - query latest tardy date and compute days since tardy
+   - build root OU from DefaultCrosOrgUnit plus optional suffix from csv/special-ous.csv
+   - if no tardy date is found, assign NoTardiesOrgUnit under the root
+   - otherwise assign tier OU based on cutoff comparison
+7. Update OU only when current OU differs from target OU (skipped in WhatIf mode).
+8. Write log/award-log-yyyy-MM-dd.csv.
 
----
+## SQL Files Used By Main Process
 
-## Process Logic Summary
+- sql/sis-get-cros.sql
+- sql/sis-active-students.sql
+- sql/sis-select-cutoff-date.sql
+- sql/sis-tardy-lookup-middle-school-full-day.sql (selected for SC = 5)
 
-1. Load award tiers from `csv/awardTable.csv`
-2. For each tier, calculate the cutoff date by calling `sql/sis-select-cutoff-date.sql` with the tier's day count (handles no-student days and weekends inside the query)
-3. Result: each tier has a resolved cutoff `[datetime]`
-4. Pull:
-   - school start date
-   - SIS student list (filtered by `ValidSiteCodes`)
-   - SIS Chromebook assignments
-   - Google ChromeOS device export (cached daily in `data/`)
-5. For each student/device:
-   - select tardy lookup SQL by site code (`SC`) via `Set-LatestTardyLookupSql`
-   - find latest tardy date via `Set-LatestTardyDate`
-   - determine root OU via `Set-RootOU`: starts from `-DefaultCrosOrgUnit`, then appends any matching suffix from `csv/special-ous.csv` based on the device's current `orgUnitPath`
-   - choose highest eligible award tier OU (appended to root OU), else root OU
-6. Update ChromeOS OU when current OU differs from target OU
-7. Write change log to `log/award-log-yyyy-MM-dd.csv`
+## SQL Files Not Used By Main Process
 
----
+In sql/:
+
+- sql/sis-select-first-day-of-school.sql
+- sql/sis-select-no-student-days.sql
+- sql/sis-tardy-lookup-middle-school-all-tardies.sql
+
+Archived in sql/unused/:
+
+- sql/unused/sis-active-students-old.sql
+- sql/unused/sis-all-data.sql
+- sql/unused/sis-select-no-student-days copy.sql
+- sql/unused/sis-tardy-middle-school-students-not-used.sql
+- sql/unused/student_return_cb.sq.sql
 
 ## Outputs
 
-## Data Cache
+### Data Cache
 
-- `data/GSuite-Export-yyyy-MM-dd.csv`
-  - reused if it already exists for the day
-  - old files older than 1 day are removed at runtime
+- data/GSuite-Export-yyyy-MM-dd.csv
+- old data CSV files older than 1 day are removed at run start
 
-## Update Log
+### Run Log
 
-- `log/award-log-yyyy-MM-dd.csv`
-  - columns: `id,sn,srcOU,targOU`
-  - only created when at least one OU change is detected
-  - **all existing log files are removed at the start of each run** before the new log is written
-
----
-
-## SQL Files in Use
-
-Current main script references:
-
-- `sql/sis-select-first-day-of-school.sql`
-- `sql/sis-get-cros.sql`
-- `sql/sis-active-students.sql`
-- `sql/sis-select-cutoff-date.sql` (calculates each tier's cutoff date; replaces manual no-student-day logic)
-- `sql/sis-tardy-lookup-middle-school.sql`
-
-The tardy lookup SQL is selected in-script per student site code (`SC`) via `Set-LatestTardyLookupSql`.
-Current mapping in script:
-
-- `SC = 5` -> `sql/sis-tardy-lookup-middle-school.sql`
-- other `SC` values currently throw an error until mapped
-
----
-
-## Jenkins Notes
-
-`jenkins.ps1` is currently empty. Common pattern is:
-
-```powershell
-.\params.ps1
-.\Update-CrOSAttendanceAward.ps1 @params -wi -ErrorAction Stop
-```
-
-Then remove `-wi` once validated.
-
----
+- log/award-log-yyyy-MM-dd.csv
+- columns: id,sn,srcOU,targOU,daysSinceTardy
+- existing files in log/ are removed at run start
 
 ## Troubleshooting
 
-- **No SIS/GSuite matches**: verify serial number formats align between SIS and Google Admin.
-- **No updates happen**: run with `-wi` and check whether current OU already equals target OU.
-- **GAM errors**: confirm `C:\GAM7\gam.exe` exists and auth is valid.
-- **SQL errors**: verify server/database/credential and query permissions.
-- **Unexpected tiering**: verify `awardTable.csv` values and OU paths.
-- **Unknown site code error**: add a mapping in `Set-LatestTardyLookupSql` and `Set-DefaultOU` for that `SC`.
+- Unknown SC error: add mapping in Set-LatestTardyLookupSql for that site code.
+- No SIS to Google match: verify serial number formatting in both systems.
+- No changes applied: expected in WhatIf mode, or when source OU already equals target OU.
+- SQL errors: verify connectivity, permissions, and parameter values.
+- GAM errors: verify C:\GAM7\gam.exe and GAM auth.
 
----
+## Safety
 
-## Safety Recommendations
-
-- Always run dry-run (`-wi`) first in each environment.
-- Limit `ValidSiteCodes` during testing.
-- Keep SQL query files version-controlled and reviewed.
-- Keep a rollback strategy for OU updates (using `log/` output).
+- Always run with -wi before live updates.
+- Test with a limited ValidSiteCodes set first.
+- Keep SQL files and csv tier config under version control.
+- Keep logs for rollback/reference before broad OU moves.

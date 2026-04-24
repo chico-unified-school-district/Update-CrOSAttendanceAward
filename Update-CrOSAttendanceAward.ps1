@@ -134,11 +134,9 @@ function Set-LastTardyDays ($instance) {
  process {
   $sql = Get-Content -Path $_.tardyLookupSql -Raw
   $data = New-SqlOperation -Server $instance -Query $sql -Parameters "sn=$($_.sis.SN)"
-  # Set tardy date to 11:59pm of that day to ensure that any tardies on the cut-off date will be included in the award zone evaluation.
-  # This is because the award zone evaluation is looking for any tardies that are greater than the cut-off date,
-  # so if a student had a tardy on the cut-off date and we set the time to 12:00am, it would not be included in the evaluation.
+  # Set most recent tardy date to 11:59pm of that day to ensure it is counted properly
   $_.lastTardyDays = if ($data.DT -match '\d{4}') { ($endOfDay - (Get-Date $data.DT).AddDays(1).AddSeconds(-1)).days }
-  if (($_.lastTardyDays -is [int]) -and ($_.lastTardyDays -lt 1)) { $_.lastTardyDays = 1 } # Round up to 1 when less than 1
+  if (($_.lastTardyDays -is [int]) -and ($_.lastTardyDays -lt 1)) { $_.lastTardyDays = 1 } # Round UP to 1 as needed
   Write-Verbose ('{0},{1},[{2}],[{3}]' -f $MyInvocation.MyCommand.Name, $_.sis.ID, $_.lastTardyDays, $data.DT)
   return $_
  }
