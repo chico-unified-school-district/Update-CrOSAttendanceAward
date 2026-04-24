@@ -15,12 +15,12 @@ param (
 function Format-StudentObject {
  process {
   [PSCustomObject]@{
-   cros                = $null
-   lastTardyDays       = $null
-   rootOU              = $null
-   sis                 = $_
-   tardyLookupSql      = $null
-   targetOU            = $null
+   cros           = $null
+   lastTardyDays  = $null
+   rootOU         = $null
+   sis            = $_
+   tardyLookupSql = $null
+   targetOU       = $null
   }
  }
 }
@@ -251,13 +251,13 @@ $gSuiteCrosDevices = Get-GSuiteCrosDevices
 
 Get-SiSStudents -instance $sisInstance -siteCodes $ValidSiteCodes |
  Format-StudentObject |
-   Set-CrosDevice -gSuiteData $gSuiteCrosDevices -sisData $siSCrosDevices |
-    Set-LatestTardyLookupSql |
-     Set-LastTardyDays -instance $sisInstance |
-      Set-RootOU -ou $DefaultCrosOrgUnit |
-       Set-GoatOU -ou $NoTardiesOrgUnit |
-        Set-AwardZoneOU -tiers $tierData |
-         Update-CrosOU |
-          Show-Object
+  Set-CrosDevice -gSuiteData $gSuiteCrosDevices -sisData $siSCrosDevices |
+   Set-LatestTardyLookupSql |
+    Set-LastTardyDays -instance $sisInstance |
+     Set-RootOU -ou $DefaultCrosOrgUnit |
+      Set-GoatOU -ou $NoTardiesOrgUnit |
+       Set-AwardZoneOU -tiers $tierData |
+        Update-CrosOU |
+         Show-Object
 
 if ($WhatIf) { Show-TestRun }
